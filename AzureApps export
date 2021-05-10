@@ -1,0 +1,127 @@
+###############################################################################################################################################################################
+############################################################################# CREDENTIAL CACHING ##############################################################################
+###############################################################################################################################################################################
+$ConnectionCred = Get-credential -Username *************
+
+###############################################################################################################################################################################
+##################################################################### SSO APPLICATION DETAIL EXTRACTION #######################################################################
+###############################################################################################################################################################################
+$extraction_start = Get-Date
+$log_application = @()
+Connect-AzureAD -TenantId "bc877e61-f6cf-4461-accd-0565fa4ca357" -Credential $ConnectionCred 
+foreach ($app in $(Get-AzureADApplication -All $true)){     #| Where-Object DisplayName -like "ris-azr*"
+        $AppOwners = if($owner = Get-AzureADApplicationOwner -ObjectId $app.objectid -All $true){$(($owner.mail | Select-Object -First 2) -join ", ").ToLower()}else{"NoOwner"}
+        $AppSecrets = Get-AzureADApplicationPasswordCredential -ObjectId $app.objectid
+        if($AppSecrets){
+            foreach($AppSecret in $AppSecrets){
+                $app_secret_lifecycle = [int]($(New-TimeSpan -Start $AppSecret.StartDate -End $AppSecret.EndDate).Days)
+                $log_cache = New-Object -TypeName PSObject
+                $log_cache | Add-Member -MemberType NoteProperty -Name "Application" -Value $app.DisplayName
+                $log_cache | Add-Member -MemberType NoteProperty -Name "AppID" -Value $($app.AppId).ToLower()
+                #$log_cache | Add-Member -MemberType NoteProperty -Name "SPObjectID" -Value $($app.ObjectId).ToLower()
+                #$log_cache | Add-Member -MemberType NoteProperty -Name "SecretID" -Value $AppSecret.KeyId
+                $log_cache | Add-Member -MemberType NoteProperty -Name "SecretStart" -Value $AppSecret.StartDate.tostring(“yyyy-MM-dd”)
+                $log_cache | Add-Member -MemberType NoteProperty -Name "SecretExpiry" -Value $AppSecret.EndDate.tostring(“yyyy-MM-dd”)
+                $log_cache | Add-Member -MemberType NoteProperty -Name "SecretLife(Days)" -Value $app_secret_lifecycle
+                $log_cache | Add-Member -MemberType NoteProperty -Name "Owner" -Value $AppOwners
+                $log_application += $log_cache
+            }
+        }
+}
+$extraction_stop = Get-Date
+$extraction_time = New-TimeSpan -Start $extraction_start -End $extraction_stop
+$extraction_time_friendly = "$($extraction_time.Hours)hrs $($extraction_time.Minutes)min $($extraction_time.seconds)sec"
+
+###############################################################################################################################################################################
+######################################################################### HTML REPORT CONSTRUCTION ############################################################################
+###############################################################################################################################################################################
+$Header = @"
+<style>
+input {width: calc(100% - 45px);font-family:Monospace;font-size: 10pt;padding: 12px 20px 12px 12px;border: 1px solid #ddd;box-sizing: border-box;margin-bottom: 12px;}
+.button {display: block; width:35px; height:35px; float: right; padding: 3px 5px 15px 5px;}
+body {background-color:#E5E4E2; font-family:Monospace; font-size:10pt;}
+table {width:100%;}
+table, th, td {border: 1px solid black;border-collapse: collapse;}
+th, td {padding: 3px;text-align: left;}
+td:nth-last-child(2) {text-align: right;}
+table tr:nth-child(even) {background-color: #eee;}
+table tr:nth-child(odd) {background-color: #fff;}
+th {background-color: black;color: white;}
+</style>
+<input type="text" onkeyup="myFunction()" placeholder="Search for anything..">
+<a href="#" class="button" onclick="download_table_as_csv('report_azure_app_info_dump');">
+<img src=https://cdn.iconscout.com/icon/premium/png-512-thumb/export-csv-553647.png width=35px height=35px>
+</a>
+"@
+$postcont = @"
+<h4><p>Updated on: $(Get-Date -Format "dddd dd/MM/yyyy HH:mm")</p></h4>
+<h4><p>Number of application objects: $($log_application.count)</p></h4>
+<h4><p>Report execution time: $extraction_time_friendly</p></h4>
+<h4><p>This report was executed from $env:computername scheduled task server.</p></h4>
+<script>
+function myFunction() {
+  // Declare variables
+  var input, filter, table, tr, td, i, txtValue;
+  input = document.getElementsByTagName("input")[0];
+  filter = input.value.toUpperCase();
+  table = document.getElementsByTagName("table")[0];
+  tr = table.getElementsByTagName("tr");
+
+  // Loop through all table rows, and hide those who don't match the search query
+  for (i = 1; i < tr.length; i++) {
+    if (tr[i]) {
+      txtValue = tr[i].textContent || tr[i].innerText;
+      if (txtValue.toUpperCase().indexOf(filter) > -1) {
+        tr[i].style.display = "";
+      } else {
+        tr[i].style.display = "none";
+      }
+    }
+  }
+}
+function download_table_as_csv(table_id) {
+    // Select rows from table_id
+    var rows = document.querySelectorAll("table tr");
+    // Construct csv
+    var csv = [];
+    for (var i = 0; i < rows.length; i++) {
+        var row = [], cols = rows[i].querySelectorAll('td, th');
+        for (var j = 0; j < cols.length; j++) {
+            // Clean innertext to remove multiple spaces and jumpline (break csv)
+            var data = cols[j].innerText.replace(/(\r\n|\n|\r)/gm, '').replace(/(\s\s)/gm, ' ')
+            // Escape double-quote with double-double-quote (see https://stackoverflow.com/questions/17808511/properly-escape-a-double-quote-in-csv)
+            data = data.replace(/"/g, '""');
+            // Push escaped string
+            row.push('"' + data + '"');
+        }
+        csv.push(row.join(','));
+    }
+    var csv_string = csv.join('\n');
+    // Download it
+    var filename = 'export_' + table_id + '_' + new Date().toLocaleDateString() + '.csv';
+    var link = document.createElement('a');
+    link.style.display = 'none';
+    link.setAttribute('target', '_blank');
+    link.setAttribute('href', 'data:text/csv;charset=utf-8,' + encodeURIComponent(csv_string));
+    link.setAttribute('download', filename);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+}
+</script>
+"@
+$log_application | Sort-Object -Property @{Expression = "SecretLife(Days)"; Descending = $True}, @{Expression = "APISecretExpiry"; Descending = $False} |
+ConvertTo-Html -Property * -Head $Header -PostContent $postcont  | out-file C:\inetpub\wwwroot\azureapps.html -Encoding ASCII
+
+
+###############################################################################################################################################################################
+#######################################################################  ALTERNATIVE HTML TABLE STYLE  ########################################################################
+###############################################################################################################################################################################
+#$Header = @"
+#<style>
+#BODY {background-color:#E5E4E2; font-family:Monospace; font-size:10pt;}
+#TABLE {border-width: 1px; border-style: solid; border-color: black; border-collapse: collapse;}
+#TH {border-width: 1px; padding: 3px; border-style: solid; border-color: black; text-align:left;background-color:#6a6a6a;font-weight:bold;color:white;}
+#TD {border-width: 1px; padding: 3px; border-style: solid; border-color: black;}
+#</style>
+#"@
